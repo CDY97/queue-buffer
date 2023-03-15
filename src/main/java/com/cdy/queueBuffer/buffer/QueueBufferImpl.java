@@ -124,7 +124,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     @Override
     public boolean put(String type, K key, V object, long timeStamp) {
         // 校验时间戳是否在可缓存范围内
-        if (timeQueueBuffer.checkTimeStamp(timeStamp)) {
+        if (timeQueueBuffer.checkTimeStamp(timeStamp) && type != null && key != null) {
             WriteBufferBean<K, V> bean = new WriteBufferBean(type, key, object);
             // 获取乐观读锁尝试写入，若写入过程中发生了writeBuffer引用切换，则重试
             if (tryPut(bean, timeStamp)) {
