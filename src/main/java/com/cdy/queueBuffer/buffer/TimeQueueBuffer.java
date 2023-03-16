@@ -273,6 +273,9 @@ public class TimeQueueBuffer<K, V> {
      */
     public Map<Long, Map<K, V>> getAllByTypeAndTimeRange(String type, long startTime, long endTime, boolean isLatest) {
         Map<Long, Map<K, V>> resMap = new LinkedHashMap<>();
+        if (type == null) {
+            return resMap;
+        }
         long tempVal = this.queueBeginTsAndIndex;
         int queueBeginIndex = getQueueBeginIndex(tempVal);
         long queueBeginTs = getQueueBeginTs(tempVal);
@@ -339,6 +342,9 @@ public class TimeQueueBuffer<K, V> {
      */
     public Map<Long, V> getAllByKeyAndTimeRange(String type, K key, long startTime, long endTime, boolean isLatest) {
         Map<Long, V> resMap = new LinkedHashMap<>();
+        if (type == null || key == null) {
+            return resMap;
+        }
         long tempVal = this.queueBeginTsAndIndex;
         int queueBeginIndex = getQueueBeginIndex(tempVal);
         long queueBeginTs = getQueueBeginTs(tempVal);
@@ -392,8 +398,11 @@ public class TimeQueueBuffer<K, V> {
     }
 
     public Map<K, V> getLatestOneByType(String type, long timeWindow) {
-        long beginTs = getQueueBeginTs(this.queueBeginTsAndIndex) + this.aliveTimeRange * 1000 - timeWindow;
         Map<K, V> resMap = new HashMap<>();
+        if (type == null) {
+            return resMap;
+        }
+        long beginTs = getQueueBeginTs(this.queueBeginTsAndIndex) + this.aliveTimeRange * 1000 - timeWindow;
         Map<K, LatestObjBean<V>> typeMap = this.latestMap.get(type);
         if (typeMap != null) {
             for (Map.Entry<K, LatestObjBean<V>> entry : typeMap.entrySet()) {
@@ -407,8 +416,11 @@ public class TimeQueueBuffer<K, V> {
     }
 
     public V getLatestOneByKey(String type, K key, long timeWindow) {
-        long beginTs = getQueueBeginTs(this.queueBeginTsAndIndex) + this.aliveTimeRange * 1000 - timeWindow;
         V resObj = null;
+        if (type == null || key == null) {
+            return resObj;
+        }
+        long beginTs = getQueueBeginTs(this.queueBeginTsAndIndex) + this.aliveTimeRange * 1000 - timeWindow;
         Map<K, LatestObjBean<V>> typeMap = this.latestMap.get(type);
         if (typeMap != null) {
             LatestObjBean<V> bean = typeMap.get(key);
