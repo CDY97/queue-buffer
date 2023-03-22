@@ -58,6 +58,8 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
             thread = new Thread(new SyncTask());
             thread.setPriority(Thread.MAX_PRIORITY);
             thread.start();
+        } else {
+            restart();
         }
         return this;
     }
