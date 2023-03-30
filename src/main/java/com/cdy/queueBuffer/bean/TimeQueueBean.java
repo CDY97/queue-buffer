@@ -8,21 +8,18 @@ public class TimeQueueBean<K, V> {
 
     private Map<String, Map<K, V>> obj = new ConcurrentHashMap<>();
 
-    // todo，返回值测试用，待删除
     public int putObject(String type, K key, V object){
         int res = 0;
         Map<K, V> typeMap = obj.get(type);
         if (typeMap == null) {
             typeMap = obj.computeIfAbsent(type, k -> new ConcurrentHashMap<>());
         }
-        // todo，待删除
         if (typeMap.put(key, object) == null) {
             res = 1;
         }
         return res;
     }
 
-    // todo，测试用，待删除
     public int getSize() {
         int size = 0;
         for (Map.Entry<String, Map<K, V>> entry : obj.entrySet()) {

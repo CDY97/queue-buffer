@@ -38,7 +38,6 @@ public class TimeQueueBuffer<K, V> {
 
     private Map<String, Map<K, LatestObjBean<V>>> latestMap = new ConcurrentHashMap<>();
 
-    // todo，测试用，待删除
     private AtomicInteger size = new AtomicInteger();
 
     public void setBeginTs(long beginTs) {
@@ -76,12 +75,10 @@ public class TimeQueueBuffer<K, V> {
         this.latestMap = new ConcurrentHashMap<>();
     }
 
-    // todo，测试用，待删除
     public int getSize() {
         return size.get();
     }
 
-    // todo，测试用，待删除
     public int getLatestOneSize() {
         int size = 0;
         for (Map.Entry<String, Map<K, LatestObjBean<V>>> entry : this.latestMap.entrySet()) {
@@ -152,7 +149,6 @@ public class TimeQueueBuffer<K, V> {
             }
         }
         int incr = queueObj.putObject(type, key, object);
-        // todo，测试用，待删除
         size.addAndGet(incr);
     }
 
@@ -191,14 +187,12 @@ public class TimeQueueBuffer<K, V> {
         int beginIndex = (queueBeginIndex - length + this.queueSize) % this.queueSize;
         int endIndex = (queueBeginIndex - 1 + this.queueSize) % this.queueSize;
         if (beginIndex > endIndex) {
-            // todo，测试用，待删除
             for (int i = beginIndex; i < this.queueSize; i++) {
                 TimeQueueBean<K, V> bean = queue[i];
                 if (bean != null) {
                     size.getAndAdd(-bean.getSize());
                 }
             }
-            // todo，测试用，待删除
             for (int i = 0; i <= endIndex; i++) {
                 TimeQueueBean<K, V> bean = queue[i];
                 if (bean != null) {
@@ -208,7 +202,6 @@ public class TimeQueueBuffer<K, V> {
             Arrays.fill(queue, beginIndex, this.queueSize, null);
             Arrays.fill(queue, 0, endIndex + 1, null);
         } else {
-            // todo，测试用，待删除
             for (int i = beginIndex; i <= endIndex; i++) {
                 TimeQueueBean<K, V> bean = queue[i];
                 if (bean != null) {

@@ -104,13 +104,11 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
         return this;
     }
 
-    // todo，测试用，待删除
     @Override
     public int getSize() {
         return timeQueueBuffer.getSize();
     }
 
-    // todo，测试用，待删除
     @Override
     public int getLatestOneSize() {
         return timeQueueBuffer.getLatestOneSize();
