@@ -212,7 +212,7 @@ public class TimeQueueBuffer<K, V> {
      */
     public synchronized void flashAndRelease() {
         long tempVal = this.queueBeginTsAndIndex;
-        // 以新下标开始向前删除5秒的缓存数据
+        // 以新下标开始向前删除缓存数据
         long queueBeginTs = getQueueBeginTs(tempVal);
         int queueBeginIndex = getQueueBeginIndex(tempVal);
         int beginIndex = (this.lastReleaseIndex + 1) % this.queueSize;

@@ -23,7 +23,7 @@ public class WriteBuffer<K, V> {
     public List<Integer> getTaskIds() {
         List<Integer> taskIds = new ArrayList<>();
         for (int i = 0; i < buffer.length; i++) {
-            if ((taskIdsMapperInt & (1 << i)) == 1) {
+            if ((taskIdsMapperInt >> i & 1) == 1) {
                 taskIds.add(i);
             }
         }
@@ -43,7 +43,7 @@ public class WriteBuffer<K, V> {
 
     public void write(WriteBufferBean<K, V> vo) {
         Map<WriteBufferBean<K, V>, Object> map = buffer[(size.getAndIncrement() % buffer.length)];
-        map.put(vo, null);
+        map.put(vo, true);
         // 设置时间戳对应的任务标识
         taskIdsMapperInt |= (1 << (int) (vo.getTimeStamp() % buffer.length));
     }
