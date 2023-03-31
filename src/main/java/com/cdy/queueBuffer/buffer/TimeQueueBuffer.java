@@ -8,21 +8,21 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class TimeQueueBuffer<K, V> {
-    // 有效时间范围最大值1000s，根据队列总长度，不能超过1048575（2^20 - 1）计算而来
-    private static final int MaxAliveTimeRange = 1000;
-    // 为了解决数据时间戳略微超过右边界从而无法缓存的问题引入，拉长右边界
-    private static final int FutureAliveTimeRange = 5;
-    // 淘汰过期缓存范围
-    private static final int ReleaseTimeRange = 5;
     // queueBeginTsAndIndex分割位
     private static final int SplitIndex = 20;
     // 队列下标在queueBeginTsAndIndex中的掩码
     private static final int QueueBeginIndexMask = (1 << SplitIndex) - 1;
+    // 有效时间范围最大值1000s，根据队列总长度，不能超过1048575（2^20 - 1）计算而来
+    private static final int MaxAliveTimeRange = 1000;
 
-    // 队列总时长
-    private int allTimeRange = 70;
     // 有效时间范围
     private int aliveTimeRange = 60;
+    // 为了解决数据时间戳略微超过右边界从而无法缓存的问题引入，拉长右边界
+    private int futureAliveTimeRange = 5;
+    // 用于删除过期数据的范围，需要大于删除时间间隔
+    private int releaseTimeRange = 1;
+    // 队列总时长
+    private int allTimeRange = aliveTimeRange + futureAliveTimeRange + releaseTimeRange;
     // 队列总长度，不能超过1048575（2^20 - 1）
     private int queueSize = allTimeRange * 1000;
     // 是否缓存当前真实时间范围内的数据，如果定义了customBeginTs即为false
@@ -33,6 +33,7 @@ public class TimeQueueBuffer<K, V> {
     // 时间窗口左边界对应时间戳和对应队列下标，前44位代表时间戳，后20位代表队列下标，放在一个变量中是为了保持两个变量的操作原子化且不加锁
     private volatile long queueBeginTsAndIndex = 0;
     private long lastRefreshTs = 0;
+    private int lastReleaseIndex = queueSize - 1;
 
     private TimeQueueBean<K, V>[] queue = null;
 
@@ -40,7 +41,7 @@ public class TimeQueueBuffer<K, V> {
 
     private AtomicInteger size = new AtomicInteger();
 
-    public void setBeginTs(long beginTs) {
+    void setBeginTs(long beginTs) {
         if (beginTs <= 0) {
             throw new IllegalArgumentException("beginTs must be a timeStamp");
         }
@@ -48,19 +49,31 @@ public class TimeQueueBuffer<K, V> {
         this.isCurFlag = false;
     }
 
-    public void setAliveTimeRange(int timeRange) {
+    void setAliveTimeRange(int timeRange) {
         if (timeRange <= 0 || timeRange > MaxAliveTimeRange) {
             throw new IllegalArgumentException("timeRange must be between 1 second and 1000 seconds");
         }
         this.aliveTimeRange = timeRange;
-        this.allTimeRange = this.aliveTimeRange + 2 * FutureAliveTimeRange;
-        this.queueSize = this.allTimeRange * 1000;
+    }
+
+    void setFutureAliveTimeRange(int futureAliveTimeRange) {
+        if (futureAliveTimeRange <= 0) {
+            throw new IllegalArgumentException("futureAliveTimeRange must be greater than 0 second");
+        }
+        this.futureAliveTimeRange = futureAliveTimeRange;
+    }
+
+    void setReleaseTimeRange(int releaseTimeRange) {
+        if (releaseTimeRange <= 0) {
+            throw new IllegalArgumentException("releaseTimeRange must be greater than 0 s");
+        }
+        this.releaseTimeRange = releaseTimeRange;
     }
 
     /**
      * 初始化环状数组开始时间、对应下标、上次刷新时间、缓存容量
      */
-    public void initParams() {
+    void initParams() {
         long queueBeginTs = 0, curTime = System.currentTimeMillis();
         int queueBeginIndex = 0;
         if (this.isCurFlag) {
@@ -69,10 +82,17 @@ public class TimeQueueBuffer<K, V> {
             queueBeginTs = this.customBeginTs - this.aliveTimeRange * 1000 + 1;
         }
         this.queueBeginTsAndIndex = getQueueBeginTsAndIndex(queueBeginTs, queueBeginIndex);
-        this.lastRefreshTs = curTime;
+        this.allTimeRange = this.aliveTimeRange + this.futureAliveTimeRange + this.releaseTimeRange;
+        if (this.allTimeRange > MaxAliveTimeRange) {
+            throw new IllegalArgumentException("queue buffer is too large, aliveTime + futureAliveTimeRange" +
+                    " + changeBufferInterval cannot be greater than 1000 seconds");
+        }
+        this.queueSize = this.allTimeRange * 1000;
         this.queue = new TimeQueueBean[this.queueSize];
         this.size = new AtomicInteger();
         this.latestMap = new ConcurrentHashMap<>();
+        this.lastRefreshTs = curTime;
+        this.lastReleaseIndex = queueSize - 1;
     }
 
     public int getSize() {
@@ -116,13 +136,25 @@ public class TimeQueueBuffer<K, V> {
     }
 
     /**
+     * 通过时间戳获取对应的环状数组下标
+     * @param timeStamp
+     * @return
+     */
+    private int getQueueIndexByTimeStamp(long timeStamp) {
+        long tempVal = this.queueBeginTsAndIndex;
+        int queueBeginIndex = getQueueBeginIndex(tempVal);
+        long queueBeginTs = getQueueBeginTs(tempVal);
+        return (int) (queueBeginIndex + (timeStamp - queueBeginTs)) % this.queueSize;
+    }
+
+    /**
      * 判断数据时间戳是否已超出可缓存范围
      * @param timeStamp
      * @return
      */
     public boolean checkTimeStamp(long timeStamp) {
         long queueBeginTs = getQueueBeginTs(this.queueBeginTsAndIndex);
-        if (timeStamp < queueBeginTs || timeStamp - queueBeginTs >= (this.aliveTimeRange + FutureAliveTimeRange) * 1000) {
+        if (timeStamp < queueBeginTs || timeStamp - queueBeginTs >= (this.aliveTimeRange + this.futureAliveTimeRange) * 1000) {
             return false;
         }
         return true;
@@ -178,13 +210,12 @@ public class TimeQueueBuffer<K, V> {
     /**
      * 释放资源
      */
-    public void flashAndRelease() {
+    public synchronized void flashAndRelease() {
         long tempVal = this.queueBeginTsAndIndex;
         // 以新下标开始向前删除5秒的缓存数据
         long queueBeginTs = getQueueBeginTs(tempVal);
         int queueBeginIndex = getQueueBeginIndex(tempVal);
-        int length = ReleaseTimeRange * 1000;
-        int beginIndex = (queueBeginIndex - length + this.queueSize) % this.queueSize;
+        int beginIndex = (this.lastReleaseIndex + 1) % this.queueSize;
         int endIndex = (queueBeginIndex - 1 + this.queueSize) % this.queueSize;
         if (beginIndex > endIndex) {
             for (int i = beginIndex; i < this.queueSize; i++) {
@@ -227,12 +258,13 @@ public class TimeQueueBuffer<K, V> {
                 typeIterator.remove();
             }
         }
+        this.lastReleaseIndex = endIndex;
     }
 
     /**
      * 刷新环状数组可缓存范围的开始时间
      */
-    public void refreshBeginTs() {
+    public synchronized void refreshBeginTs() {
         long tempVal = this.queueBeginTsAndIndex;
         // 根据真实时间差推动时间轮的beginTs
         // 时间轮有效时间窗口左边界对应环状数组下标
@@ -243,18 +275,6 @@ public class TimeQueueBuffer<K, V> {
         long queueBeginTs = getQueueBeginTs(tempVal) + curTs - lastRefreshTs;
         this.queueBeginTsAndIndex = getQueueBeginTsAndIndex(queueBeginTs, queueBeginIndex);
         this.lastRefreshTs = curTs;
-    }
-
-    /**
-     * 通过时间戳获取对应的环状数组下标
-     * @param timeStamp
-     * @return
-     */
-    private int getQueueIndexByTimeStamp(long timeStamp) {
-        long tempVal = this.queueBeginTsAndIndex;
-        int queueBeginIndex = getQueueBeginIndex(tempVal);
-        long queueBeginTs = getQueueBeginTs(tempVal);
-        return (int) (queueBeginIndex + (timeStamp - queueBeginTs)) % this.queueSize;
     }
 
     /**
@@ -279,7 +299,7 @@ public class TimeQueueBuffer<K, V> {
             startTime = endTime - intervel;
         } else {
             startTime = Math.max(startTime, queueBeginTs);
-            endTime = Math.min(endTime, queueBeginTs + (this.aliveTimeRange + FutureAliveTimeRange) * 1000 - 1);
+            endTime = Math.min(endTime, queueBeginTs + (this.aliveTimeRange + this.futureAliveTimeRange) * 1000 - 1);
         }
         if (startTime > endTime) {
             return resMap;
@@ -347,7 +367,7 @@ public class TimeQueueBuffer<K, V> {
             startTime = endTime - intervel;
         } else {
             startTime = Math.max(startTime, queueBeginTs);
-            endTime = Math.min(endTime, queueBeginTs + (this.aliveTimeRange + FutureAliveTimeRange) * 1000 - 1);
+            endTime = Math.min(endTime, queueBeginTs + (this.aliveTimeRange + this.futureAliveTimeRange) * 1000 - 1);
         }
         if (startTime > endTime) {
             return resMap;

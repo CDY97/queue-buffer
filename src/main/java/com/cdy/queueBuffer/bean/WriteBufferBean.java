@@ -6,11 +6,13 @@ public class WriteBufferBean<K, V> {
     private String type;
     private K key;
     private V object;
+    private long timeStamp;
 
-    public WriteBufferBean(String type, K key, V object) {
+    public WriteBufferBean(String type, K key, V object, long timeStamp) {
         this.type = type;
         this.key = key;
         this.object = object;
+        this.timeStamp = timeStamp;
     }
 
     public String getType() {
@@ -37,16 +39,26 @@ public class WriteBufferBean<K, V> {
         this.object = object;
     }
 
+    public long getTimeStamp() {
+        return timeStamp;
+    }
+
+    public void setTimeStamp(long timeStamp) {
+        this.timeStamp = timeStamp;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
-        if (o == null || getClass() != o.getClass()) return false;
-        WriteBufferBean<K, V> that = (WriteBufferBean<K, V>) o;
-        return Objects.equals(key, that.key) && Objects.equals(type, that.type);
+        if (!(o instanceof WriteBufferBean)) return false;
+        WriteBufferBean<?, ?> that = (WriteBufferBean<?, ?>) o;
+        return timeStamp == that.timeStamp &&
+                Objects.equals(type, that.type) &&
+                Objects.equals(key, that.key);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(key, type);
+        return Objects.hash(type, key, timeStamp);
     }
 }

@@ -8,6 +8,16 @@ public interface QueueBuffer<K, V> {
 
     public QueueBuffer<K, V> setAliveTimeSeconds(int seconds);
 
+    public QueueBuffer<K, V> setFutureAliveTimeRangeSeconds(int seconds);
+
+    public QueueBuffer<K, V> setSyncParallelism(int syncParallelism);
+
+    public QueueBuffer<K, V> setChangeBufferIntervalMs(int changeBufferInterval);
+
+    public QueueBuffer<K, V> setReleaseIntervalMs(int releaseInterval);
+
+    public QueueBuffer<K, V> setOptimisticPutRetryCount(int retryCount);
+
     public QueueBuffer<K, V> start();
 
     public QueueBuffer<K, V> shutDown();

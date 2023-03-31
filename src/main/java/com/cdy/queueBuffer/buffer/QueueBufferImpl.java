@@ -1,26 +1,24 @@
 package com.cdy.queueBuffer.buffer;
 
 import com.cdy.queueBuffer.bean.WriteBufferBean;
-import com.cdy.queueBuffer.bean.WriteBufferBeanList;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.StampedLock;
 
 public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
+    private int syncParallelism = 4;
+    private int changeBufferInterval = 1;
+    private int releaseInterval = 1000;
+    private int retryCount = 3;
 
     private TimeQueueBuffer<K, V> timeQueueBuffer = new TimeQueueBuffer();
-    private volatile WriteBuffer writeBuffer = new WriteBuffer();
+    private volatile WriteBuffer writeBuffer = new WriteBuffer(syncParallelism);
     private Set<K> queueTypeTable = new HashSet<>();
 
     private volatile Thread thread = null;
 
     private StampedLock putAndSyncLock = new StampedLock();
-
-    private static final int SyncParallelism = 4;
-    private static final int ChangeBufferInterval = 1;
-    private static final int ReleaseInterval = 1000;
-    private static final int RetryCount = 3;
 
     /**
      * 重新设置可缓存开始时间点
@@ -49,6 +47,81 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     }
 
     /**
+     * 设置可缓存的时间戳大于当前的时间戳的最大秒数
+     * @param seconds
+     * @return
+     */
+    @Override
+    public QueueBuffer<K, V> setFutureAliveTimeRangeSeconds(int seconds) {
+        if (thread == null || thread != null && !thread.isAlive()) {
+            timeQueueBuffer.setFutureAliveTimeRange(seconds);
+        }
+        return this;
+    }
+
+    /**
+     * 设置缓冲Map数，值越大发生锁争抢概率越低，但更占内存
+     * @param syncParallelism
+     * @return
+     */
+    @Override
+    public QueueBuffer<K, V> setSyncParallelism(int syncParallelism) {
+        if (thread == null || thread != null && !thread.isAlive()) {
+            if (changeBufferInterval <= 0) {
+                throw new IllegalArgumentException("syncParallelism must be greater than 0");
+            }
+            this.syncParallelism = syncParallelism;
+        }
+        return this;
+    }
+
+    /**
+     * 设置切换缓冲对象毫秒数
+     * @param changeBufferInterval
+     * @return
+     */
+    @Override
+    public QueueBuffer<K, V> setChangeBufferIntervalMs(int changeBufferInterval) {
+        if (thread == null || thread != null && !thread.isAlive()) {
+            if (changeBufferInterval <= 0) {
+                throw new IllegalArgumentException("changeBufferInterval must be greater than 0 ms");
+            }
+            this.changeBufferInterval = changeBufferInterval;
+        }
+        return this;
+    }
+
+    /**
+     * 设置执行清除过期缓存任务的间隔毫秒数
+     * @param releaseInterval
+     * @return
+     */
+    @Override
+    public QueueBuffer<K, V> setReleaseIntervalMs(int releaseInterval) {
+        if (thread == null || thread != null && !thread.isAlive()) {
+            if (releaseInterval <= 0) {
+                throw new IllegalArgumentException("releaseInterval must be greater than 0 ms");
+            }
+            this.releaseInterval = releaseInterval;
+            this.timeQueueBuffer.setReleaseTimeRange((int) Math.ceil(1.0 * releaseInterval / 1000));
+        }
+        return this;
+    }
+
+    /**
+     * 设置乐观写重试次数
+     * @param retryCount
+     * @return
+     */
+    @Override
+    public QueueBuffer<K, V> setOptimisticPutRetryCount(int retryCount) {
+        if (thread == null || thread != null && !thread.isAlive()) {
+            this.retryCount = retryCount;
+        }
+        return this;
+    }
+
+    /**
      * 启动缓存
      */
     @Override
@@ -71,7 +144,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     public synchronized QueueBuffer<K, V> shutDown() {
         thread.interrupt();
         timeQueueBuffer.initParams();
-        writeBuffer = new WriteBuffer();
+        writeBuffer = new WriteBuffer(syncParallelism);
         return this;
     }
 
@@ -81,7 +154,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     @Override
     public synchronized QueueBuffer<K, V> restart() {
         if (thread != null && !thread.isAlive()) {
-            writeBuffer = new WriteBuffer();
+            writeBuffer = new WriteBuffer(syncParallelism);
             timeQueueBuffer.initParams();
             thread = new Thread(new SyncTask());
             thread.setPriority(Thread.MAX_PRIORITY);
@@ -125,22 +198,22 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     public boolean put(String type, K key, V object, long timeStamp) {
         // 校验时间戳是否在可缓存范围内
         if (timeQueueBuffer.checkTimeStamp(timeStamp) && type != null && key != null) {
-            WriteBufferBean<K, V> bean = new WriteBufferBean(type, key, object);
+            WriteBufferBean<K, V> bean = new WriteBufferBean(type, key, object, timeStamp);
             // 获取乐观读锁尝试写入，若写入过程中发生了writeBuffer引用切换，则重试
-            if (tryPut(bean, timeStamp)) {
+            if (tryPut(bean)) {
                 return true;
             } else {
-                for (int i = 0; i < RetryCount; i++) {
+                for (int i = 0; i < retryCount; i++) {
                     if (!timeQueueBuffer.checkTimeStamp(timeStamp)) {
                         return false;
                     }
-                    if (tryPut(bean, timeStamp)) {
+                    if (tryPut(bean)) {
                         return true;
                     }
                 }
                 // 重试了RetryCount次后获取悲观读锁进行写入
                 if (timeQueueBuffer.checkTimeStamp(timeStamp)) {
-                    getReadLockAndPut(bean, timeStamp);
+                    getReadLockAndPut(bean);
                     return true;
                 } else {
                     return false;
@@ -154,24 +227,22 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     /**
      * 获取乐观读锁写入缓冲
      * @param bean
-     * @param timeStamp
      * @return
      */
-    public boolean tryPut(WriteBufferBean<K, V> bean, long timeStamp) {
+    public boolean tryPut(WriteBufferBean<K, V> bean) {
         long stamp = putAndSyncLock.tryOptimisticRead();
-        this.writeBuffer.write(bean, timeStamp);
+        this.writeBuffer.write(bean);
         return putAndSyncLock.validate(stamp);
     }
 
     /**
      * 获取悲观读锁写入缓冲
      * @param bean
-     * @param timeStamp
      */
-    public void getReadLockAndPut(WriteBufferBean<K, V> bean, long timeStamp) {
+    public void getReadLockAndPut(WriteBufferBean<K, V> bean) {
         long stamp = putAndSyncLock.readLock();
         try {
-            this.writeBuffer.write(bean, timeStamp);
+            this.writeBuffer.write(bean);
         } finally {
             putAndSyncLock.unlockRead(stamp);
         }
@@ -270,7 +341,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
                     e.printStackTrace();
                 } finally {
                     try {
-                        Thread.sleep(ChangeBufferInterval);
+                        Thread.sleep(changeBufferInterval);
                     } catch (InterruptedException e) {
                         break;
                     }
@@ -288,7 +359,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
             if (writeBuffer.getSize() <= 0) {
                 return oldBuffer;
             }
-            WriteBuffer tempNewWriteBuffer = new WriteBuffer();
+            WriteBuffer tempNewWriteBuffer = new WriteBuffer(syncParallelism);
             long stamp = putAndSyncLock.writeLock();
             try {
                 oldBuffer = QueueBufferImpl.this.writeBuffer;
@@ -305,32 +376,29 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
          */
         private void syncBuffer(WriteBuffer<K, V> buffer) {
             if (buffer != null) {
-                // 将多个缓冲map的数据根据时间范围切分为SyncParallelism个部分，用于并行处理
-                List<WriteBufferBeanList<K, V>>[] bufferList = splitBuffer(buffer);
+                List<Integer> taskIds = buffer.getTaskIds();
                 // 异步执行多个同步缓冲到latestMap的任务
-                syncBufferToLatestMapWithAsync(bufferList);
+                syncBufferToLatestMapWithAsync(buffer, taskIds);
                 // 同步等待多个同步缓冲到queueBuffer的任务，需要在最后执行
-                syncBufferToQueueBufferWithSync(bufferList);
+                syncBufferToQueueBufferWithSync(buffer, taskIds);
             }
         }
 
         /**
          * 异步执行多个同步缓冲到latestMap的任务
-         * @param bufferArr
+         * @param buffer
          */
-        private void syncBufferToLatestMapWithAsync(List<WriteBufferBeanList<K, V>>[] bufferArr) {
+        private void syncBufferToLatestMapWithAsync(WriteBuffer<K, V> buffer, List<Integer> taskIds) {
             // 异步操作同步缓冲到latestMap中
-            for (int i = 0; i < bufferArr.length; i++) {
-                List<WriteBufferBeanList<K, V>> beanListVoList = bufferArr[i];
+            for (Integer taskId : taskIds) {
                 CompletableFuture.runAsync(() -> {
-                    for (WriteBufferBeanList<K, V> beanListVo : beanListVoList) {
-                        long timeStamp = beanListVo.getTimeStamp();
-                        List<WriteBufferBean<K, V>> beanList = beanListVo.getVoList();
-                        synchronized (beanList) {
-                            for (WriteBufferBean<K, V> bean : beanList) {
-                                timeQueueBuffer.putObjectInLatestMap(bean.getType(), bean.getKey(), bean.getObject(), timeStamp);
+                    for (Map<WriteBufferBean<K, V>, Object> beanMap : buffer.getBuffer()) {
+                        beanMap.forEach((k, v) -> {
+                            // 根据时间戳判断数据属于当前任务的才同步
+                            if (k.getTimeStamp() % syncParallelism == taskId) {
+                                timeQueueBuffer.putObjectInLatestMap(k.getType(), k.getKey(), k.getObject(), k.getTimeStamp());
                             }
-                        }
+                        });
                     }
                 });
             }
@@ -338,71 +406,26 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
 
         /**
          * 同步等待多个同步缓冲到queueBuffer的任务
-         * @param bufferList
+         * @param buffer
          */
-        private void syncBufferToQueueBufferWithSync(List<WriteBufferBeanList<K, V>>[] bufferList) {
-            CompletableFuture[] asyncArr = new CompletableFuture[bufferList.length];
+        private void syncBufferToQueueBufferWithSync(WriteBuffer<K, V> buffer, List<Integer> taskIds) {
+            CompletableFuture[] asyncArr = new CompletableFuture[taskIds.size()];
             // 并行同步数据，因为并行任务每个线程负责同步的时间对应的map都是相互独立的，所以不会有并发问题
-            for (int i = 0; i < bufferList.length; i++) {
-                asyncArr[i] = syncDataAsyncTask(bufferList[i]);
+            for (int i = 0; i < asyncArr.length; i++) {
+                Integer taskId = taskIds.get(i);
+                asyncArr[i] = CompletableFuture.runAsync(() -> {
+                    for (Map<WriteBufferBean<K, V>, Object> beanMap : buffer.getBuffer()) {
+                        beanMap.forEach((k, v) -> {
+                            // 根据时间戳判断数据属于当前任务的才同步
+                            if (k.getTimeStamp() % syncParallelism == taskId) {
+                                timeQueueBuffer.putObject(k.getType(), k.getKey(), k.getObject(), k.getTimeStamp());
+                            }
+                        });
+                    }
+                });
             }
             // 等待并行同步完成
             CompletableFuture.allOf(asyncArr).join();
-        }
-
-        /**
-         * 将缓冲切分为多个部分，用于并行处理
-         * @param buffer
-         * @return
-         */
-        private List<WriteBufferBeanList<K, V>>[] splitBuffer(WriteBuffer<K, V> buffer) {
-            Map<Long, List<WriteBufferBean<K, V>>>[] oldBufferArr = buffer.getBuffer();
-            List<WriteBufferBeanList<K, V>> allBufferList = new ArrayList<>();
-            // 将缓冲中四个map的数据都放到一个list里
-            for (int i = 0; i < oldBufferArr.length; i++) {
-                Map<Long, List<WriteBufferBean<K, V>>> oldBuffer = oldBufferArr[i];
-                for (Map.Entry<Long, List<WriteBufferBean<K, V>>> entry : oldBuffer.entrySet()) {
-                    allBufferList.add(new WriteBufferBeanList(entry.getKey(), entry.getValue()));
-                }
-            }
-            // 根据每个时间戳对应的缓存list大小做排序
-            allBufferList.sort(Comparator.comparingInt(a -> -a.getVoList().size()));
-            // 若缓存的时间戳种类不超过SyncParallelism，则创建更小的数组
-            int length = Math.min(SyncParallelism, allBufferList.size());
-            List<WriteBufferBeanList<K, V>>[] resArr = new List[length];
-            for (int i = 0; i < resArr.length; i++) {
-                resArr[i] = new ArrayList<>();
-            }
-            int allSize = buffer.getSize(), curIndex = 0, curSize = 0, splitFlag = allSize / length;
-            // 将缓存较平均地分为4份
-            for (int i = 0; i < allBufferList.size(); i++) {
-                WriteBufferBeanList<K, V> curList = allBufferList.get(i);
-                resArr[curIndex].add(curList);
-                curSize += curList.getVoList().size();
-                if (curSize >= splitFlag && curIndex < length - 1) {
-                    curIndex++;
-                    splitFlag += allSize / length;
-                }
-            }
-            return resArr;
-        }
-
-        /**
-         * 创建异步任务，并行同步数据，每个任务负责不同时间段的数据
-         * @param bufferList
-         * @return
-         */
-        private CompletableFuture<Void> syncDataAsyncTask(List<WriteBufferBeanList<K, V>> bufferList) {
-            return CompletableFuture.runAsync(() -> {
-                for (WriteBufferBeanList<K, V> list : bufferList) {
-                    List<WriteBufferBean<K, V>> buffer = list.getVoList();
-                    synchronized (buffer) {
-                        for (WriteBufferBean<K, V> vo : buffer) {
-                            timeQueueBuffer.putObject(vo.getType(), vo.getKey(), vo.getObject(), list.getTimeStamp());
-                        }
-                    }
-                }
-            });
         }
 
         /**
@@ -412,7 +435,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
          */
         private long stepTimeWindowAndRelease(long releaseTime) {
             long curTime = System.currentTimeMillis();
-            if (curTime - releaseTime >= ReleaseInterval) {
+            if (curTime - releaseTime >= releaseInterval) {
                 timeQueueBuffer.refreshBeginTs();
                 // 异步删除过期缓存
                 CompletableFuture.runAsync(() -> timeQueueBuffer.flashAndRelease());
