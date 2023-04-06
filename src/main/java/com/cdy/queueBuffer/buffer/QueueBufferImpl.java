@@ -69,6 +69,8 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
         if (thread == null || thread != null && !thread.isAlive()) {
             if (changeBufferInterval <= 0) {
                 throw new IllegalArgumentException("syncParallelism must be greater than 0");
+            } else if (changeBufferInterval > 32) {
+                throw new IllegalArgumentException("syncParallelism must be smaller than 33");
             }
             this.syncParallelism = syncParallelism;
         }
@@ -196,10 +198,13 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public boolean put(String type, K key, V object, long timeStamp) {
+        if (type == null || key == null || object == null) {
+            throw new NullPointerException();
+        }
         // 校验时间戳是否在可缓存范围内
-        if (timeQueueBuffer.checkTimeStamp(timeStamp) && type != null && key != null) {
+        if (timeQueueBuffer.checkTimeStamp(timeStamp)) {
             WriteBufferBean<K, V> bean = new WriteBufferBean(type, key, object, timeStamp);
-            // 获取乐观读锁尝试写入，若写入过程中发生了writeBuffer引用切换，则重试
+            // 尝试写入，通过缓冲的writable字段判断是否发生引用切换，若写入过程中发生了writeBuffer引用切换，则重试
             if (tryPut(bean)) {
                 return true;
             } else {
@@ -225,14 +230,12 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     }
 
     /**
-     * 获取乐观读锁写入缓冲
+     * 写入缓冲
      * @param bean
      * @return
      */
     public boolean tryPut(WriteBufferBean<K, V> bean) {
-        long stamp = putAndSyncLock.tryOptimisticRead();
-        this.writeBuffer.write(bean);
-        return putAndSyncLock.validate(stamp);
+        return this.writeBuffer.write(bean);
     }
 
     /**
@@ -354,15 +357,16 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
          * @return
          */
         private WriteBuffer<K, V> lockAndChangeWriteBuffer() {
-            WriteBuffer<K, V> oldBuffer = null;
+            WriteBuffer<K, V> oldBuffer = writeBuffer;
             // 若缓冲中无数据，则不创建新缓冲，复用之前的缓冲对象
-            if (writeBuffer.getSize() <= 0) {
-                return oldBuffer;
+            if (oldBuffer.getSize() <= 0) {
+                return null;
             }
             WriteBuffer tempNewWriteBuffer = new WriteBuffer(syncParallelism);
             long stamp = putAndSyncLock.writeLock();
             try {
-                oldBuffer = QueueBufferImpl.this.writeBuffer;
+                // 将旧缓冲writable标志位置为false，正在向该缓冲里写数据的线程需要重新向新缓冲里写数据
+                oldBuffer.close();
                 writeBuffer = tempNewWriteBuffer;
             } finally {
                 putAndSyncLock.unlockWrite(stamp);
@@ -392,14 +396,13 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
             // 异步操作同步缓冲到latestMap中
             for (Integer taskId : taskIds) {
                 CompletableFuture.runAsync(() -> {
-                    for (Map<WriteBufferBean<K, V>, Object> beanMap : buffer.getBuffer()) {
-                        beanMap.forEach((k, v) -> {
-                            // 根据时间戳判断数据属于当前任务的才同步
-                            if (k.getTimeStamp() % syncParallelism == taskId) {
-                                timeQueueBuffer.putObjectInLatestMap(k.getType(), k.getKey(), k.getObject(), k.getTimeStamp());
-                            }
-                        });
-                    }
+                    buffer.getBuffer().strongConsistencyForEach((bean) -> {
+                        // 根据时间戳判断数据属于当前任务的才同步
+                        if (bean.getTimeStamp() % syncParallelism == taskId) {
+                            timeQueueBuffer.putObjectInLatestMap(bean.getType(), bean.getKey(),
+                                    bean.getObject(), bean.getTimeStamp());
+                        }
+                    });
                 });
             }
         }
@@ -414,14 +417,13 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
             for (int i = 0; i < asyncArr.length; i++) {
                 Integer taskId = taskIds.get(i);
                 asyncArr[i] = CompletableFuture.runAsync(() -> {
-                    for (Map<WriteBufferBean<K, V>, Object> beanMap : buffer.getBuffer()) {
-                        beanMap.forEach((k, v) -> {
-                            // 根据时间戳判断数据属于当前任务的才同步
-                            if (k.getTimeStamp() % syncParallelism == taskId) {
-                                timeQueueBuffer.putObject(k.getType(), k.getKey(), k.getObject(), k.getTimeStamp());
-                            }
-                        });
-                    }
+                    buffer.getBuffer().strongConsistencyForEach((bean) -> {
+                        // 根据时间戳判断数据属于当前任务的才同步
+                        if (bean.getTimeStamp() % syncParallelism == taskId) {
+                            timeQueueBuffer.putObject(bean.getType(), bean.getKey(),
+                                    bean.getObject(), bean.getTimeStamp());
+                        }
+                    });
                 });
             }
             // 等待并行同步完成

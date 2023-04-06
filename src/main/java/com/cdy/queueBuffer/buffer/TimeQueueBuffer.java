@@ -171,14 +171,9 @@ public class TimeQueueBuffer<K, V> {
     public void putObject(String type, K key, V object, long timeStamp) {
         int index = getQueueIndexByTimeStamp(timeStamp);
         TimeQueueBean queueObj = queue[index];
-        // 双检锁方式创建TimeQueueBean
         if (queueObj == null) {
-            synchronized (queue) {
-                if (queue[index] == null) {
-                    queueObj = new TimeQueueBean();
-                    queue[index] = queueObj;
-                }
-            }
+            queueObj = new TimeQueueBean();
+            queue[index] = queueObj;
         }
         int incr = queueObj.putObject(type, key, object);
         size.addAndGet(incr);
@@ -306,6 +301,9 @@ public class TimeQueueBuffer<K, V> {
         }
         int beginIndex = getQueueIndexByTimeStamp(startTime);
         int endIndex = getQueueIndexByTimeStamp(endTime);
+        if (beginIndex < 0 || beginIndex >= queueSize || endIndex < 0 || endIndex >= queueSize) {
+            return resMap;
+        }
         if (beginIndex > endIndex) {
             // 环状数组起始时间与对应时间戳的差
             long tempInterval = queueBeginTs - queueBeginIndex;
@@ -374,6 +372,9 @@ public class TimeQueueBuffer<K, V> {
         }
         int beginIndex = getQueueIndexByTimeStamp(startTime);
         int endIndex = getQueueIndexByTimeStamp(endTime);
+        if (beginIndex < 0 || beginIndex >= queueSize || endIndex < 0 || endIndex >= queueSize) {
+            return resMap;
+        }
         if (beginIndex > endIndex) {
             long tempInterval = queueBeginTs - queueBeginIndex;
             for (int i = beginIndex; i < this.queueSize; i++) {

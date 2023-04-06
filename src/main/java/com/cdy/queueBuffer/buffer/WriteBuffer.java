@@ -1,29 +1,31 @@
 package com.cdy.queueBuffer.buffer;
 
 import com.cdy.queueBuffer.bean.WriteBufferBean;
+import com.cdy.queueBuffer.concurrent.ConcurrentQuickList;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class WriteBuffer<K, V> {
 
-    private Map<WriteBufferBean<K, V>, Object>[] buffer;
+    private ConcurrentQuickList<WriteBufferBean<K, V>> buffer;
 
-    private volatile int taskIdsMapperInt = 0;
+    private AtomicInteger taskIdsMapperInt;
 
-    private AtomicInteger size = new AtomicInteger();
+    private volatile boolean writable;
 
-    public Map<WriteBufferBean<K, V>, Object>[] getBuffer() {
-        return buffer;
+    private int syncParallelism;
+
+    public ConcurrentQuickList<WriteBufferBean<K, V>> getBuffer() {
+        return this.buffer;
     }
 
     public List<Integer> getTaskIds() {
         List<Integer> taskIds = new ArrayList<>();
-        for (int i = 0; i < buffer.length; i++) {
-            if ((taskIdsMapperInt >> i & 1) == 1) {
+        int mask = this.taskIdsMapperInt.get();
+        for (int i = 0; i < this.syncParallelism; i++) {
+            if ((mask >> i & 1) == 1) {
                 taskIds.add(i);
             }
         }
@@ -31,20 +33,24 @@ public class WriteBuffer<K, V> {
     }
 
     public WriteBuffer(int syncParallelism) {
-        this.buffer = new Map[syncParallelism];
-        for (int i = 0; i < syncParallelism; i++) {
-            buffer[i] = new ConcurrentHashMap<>();
-        }
+        this.buffer = new ConcurrentQuickList<>();
+        this.taskIdsMapperInt = new AtomicInteger();
+        this.writable = true;
+        this.syncParallelism = syncParallelism;
     }
 
     public int getSize() {
-        return size.get();
+        return this.buffer.size();
     }
 
-    public void write(WriteBufferBean<K, V> vo) {
-        Map<WriteBufferBean<K, V>, Object> map = buffer[(size.getAndIncrement() % buffer.length)];
-        map.put(vo, true);
+    public boolean write(WriteBufferBean<K, V> vo) {
         // 设置时间戳对应的任务标识
-        taskIdsMapperInt |= (1 << (int) (vo.getTimeStamp() % buffer.length));
+        taskIdsMapperInt.getAndUpdate(value -> value | (1 << (int) (vo.getTimeStamp() % this.syncParallelism)));
+        this.buffer.add(vo);
+        return this.writable;
+    }
+
+    public void close() {
+        this.writable = false;
     }
 }
