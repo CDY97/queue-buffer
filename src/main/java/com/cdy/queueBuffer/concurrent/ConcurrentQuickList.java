@@ -4,14 +4,14 @@ import java.io.Serializable;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class ConcurrentQuickList<T> implements Cloneable, Serializable {
-    private AtomicInteger size;
-    private volatile int usedSize = 8;
+    private AtomicInteger usedSize;
+    private volatile int totalSize = 8;
     private ArrayNode<T> head;
     private volatile ArrayNode<T> tail;
 
     private void init(int size) {
-        this.size = new AtomicInteger();
-        this.usedSize = size;
+        this.usedSize = new AtomicInteger();
+        this.totalSize = size;
         this.head = new ArrayNode<>(size, 0);
         this.tail = this.head;
     }
@@ -21,30 +21,30 @@ public class ConcurrentQuickList<T> implements Cloneable, Serializable {
     }
 
     public ConcurrentQuickList() {
-        this.init(this.usedSize);
+        this.init(this.totalSize);
     }
 
     public int size() {
-        return size.get();
+        return usedSize.get();
     }
 
     public void add(T t) {
         if (t == null) {
             throw new NullPointerException();
         }
-        int curSize = this.size.incrementAndGet(), index = curSize - 1;
+        int curSize = this.usedSize.incrementAndGet(), index = curSize - 1;
         if (curSize < 0) {
-            this.size.decrementAndGet();
+            this.usedSize.decrementAndGet();
             throw new OutOfMemoryError();
         }
-        if (index >= this.usedSize) {
+        if (index >= this.totalSize) {
             synchronized (this) {
-                if (index >= this.usedSize) {
-                    ArrayNode newNode = new ArrayNode(Math.max(this.usedSize / 2, index - this.usedSize + 1), this.usedSize);
+                if (index >= this.totalSize) {
+                    ArrayNode newNode = new ArrayNode(Math.max(this.totalSize / 2, index - this.totalSize + 1), this.totalSize);
                     this.tail.next = newNode;
                     newNode.pre = this.tail;
                     this.tail = newNode;
-                    this.usedSize += newNode.size();
+                    this.totalSize += newNode.size();
                 }
             }
         }
@@ -111,7 +111,7 @@ public class ConcurrentQuickList<T> implements Cloneable, Serializable {
 
     public void strongConsistencyForEach(CallBack<? super T> callBack) {
         ArrayNode<T> node = this.head, preNode = node;
-        int endIndex = size.get() - 1, curIndex = 0;
+        int endIndex = usedSize.get() - 1, curIndex = 0;
         while (curIndex <= endIndex) {
             if (node == null) {
                 do {
@@ -147,7 +147,7 @@ public class ConcurrentQuickList<T> implements Cloneable, Serializable {
 
     public void weakConsistencyForEach(CallBack<? super T> callBack) {
         ArrayNode<T> node = this.head;
-        int endIndex = size.get() - 1, curIndex = 0;
+        int endIndex = usedSize.get() - 1, curIndex = 0;
         while (node != null) {
             for (int i = 0; i < node.array.length; i++, curIndex++) {
                 if (curIndex > endIndex) {
@@ -164,7 +164,7 @@ public class ConcurrentQuickList<T> implements Cloneable, Serializable {
     }
 
     private void rangeCheck(int index) {
-        int curSize = this.size.get();
+        int curSize = this.usedSize.get();
         if (index >= curSize) {
             throw new IndexOutOfBoundsException("Index: " + index+ ", Size: " + curSize);
         }
@@ -174,7 +174,7 @@ public class ConcurrentQuickList<T> implements Cloneable, Serializable {
     public String toString() {
         StringBuilder content = new StringBuilder();
         ArrayNode tempNode = this.head;
-        int size = this.size.get();
+        int size = this.usedSize.get();
         int index = 0;
         while (tempNode != null) {
             for (int i = 0; i < tempNode.size() && index < size; i++, index++) {
