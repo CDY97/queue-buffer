@@ -1,6 +1,7 @@
 package com.cdy.queueBuffer.buffer;
 
 import com.cdy.queueBuffer.bean.WriteBufferBean;
+import executor.BufferExecutor;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -19,6 +20,8 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     private volatile Thread thread = null;
 
     private StampedLock putAndSyncLock = new StampedLock();
+
+    private BufferExecutor executor = null;
 
     /**
      * 重新设置可缓存开始时间点
@@ -130,6 +133,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     public synchronized QueueBuffer<K, V> start() {
         if (thread == null) {
             timeQueueBuffer.initParams();
+            executor = BufferExecutor.getInstance(syncParallelism);
             thread = new Thread(new SyncTask());
             thread.setPriority(Thread.MAX_PRIORITY);
             thread.start();
@@ -403,7 +407,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
                                     bean.getObject(), bean.getTimeStamp());
                         }
                     });
-                });
+                }, executor.threadPool());
             }
         }
 
@@ -424,7 +428,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
                                     bean.getObject(), bean.getTimeStamp());
                         }
                     });
-                });
+                }, executor.threadPool());
             }
             // 等待并行同步完成
             CompletableFuture.allOf(asyncArr).join();
@@ -440,7 +444,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
             if (curTime - releaseTime >= releaseInterval) {
                 timeQueueBuffer.refreshBeginTs();
                 // 异步删除过期缓存
-                CompletableFuture.runAsync(() -> timeQueueBuffer.flashAndRelease());
+                CompletableFuture.runAsync(() -> timeQueueBuffer.flashAndRelease(), executor.threadPool());
                 releaseTime = curTime;
             }
             return releaseTime;
