@@ -5,21 +5,21 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class BufferExecutor {
 
-    private Executor executor;
+    private ExecutorService executor;
 
-    public Executor threadPool() {
+    public ExecutorService threadPool() {
         return executor;
     }
 
     private BufferExecutor() {
     }
 
-    private BufferExecutor(Executor executor) {
+    private BufferExecutor(ExecutorService executor) {
         this.executor = executor;
     }
 
     public static BufferExecutor getInstance(int coreSize) {
-        Executor executor = new ThreadPoolExecutor(
+        ExecutorService executor = new ThreadPoolExecutor(
                 coreSize,
                 coreSize * 2,
                 1,
@@ -41,5 +41,9 @@ public class BufferExecutor {
                 new ThreadPoolExecutor.CallerRunsPolicy()
         );
         return new BufferExecutor(executor);
+    }
+
+    public void shutDown() {
+        executor.shutdown();
     }
 }

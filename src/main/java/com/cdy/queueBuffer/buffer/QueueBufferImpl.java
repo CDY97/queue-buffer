@@ -149,8 +149,9 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     @Override
     public synchronized QueueBuffer<K, V> shutDown() {
         thread.interrupt();
-        timeQueueBuffer.initParams();
         writeBuffer = new WriteBuffer(syncParallelism);
+        timeQueueBuffer.initParams();
+        executor.shutDown();
         return this;
     }
 
@@ -162,6 +163,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
         if (thread != null && !thread.isAlive()) {
             writeBuffer = new WriteBuffer(syncParallelism);
             timeQueueBuffer.initParams();
+            executor = BufferExecutor.getInstance(syncParallelism);
             thread = new Thread(new SyncTask());
             thread.setPriority(Thread.MAX_PRIORITY);
             thread.start();
