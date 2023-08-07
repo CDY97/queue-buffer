@@ -288,12 +288,10 @@ public class TimeQueueBuffer<K, V> {
         int queueBeginIndex = getQueueBeginIndex(tempVal);
         long queueBeginTs = getQueueBeginTs(tempVal);
         // 如果取最新时间范围则计算环状数组最新范围下标，否则使用用户传的时间范围
+        startTime = Math.max(startTime, queueBeginTs);
         if (isLatest) {
-            long intervel = endTime - startTime;
             endTime = queueBeginTs + this.aliveTimeRange * 1000 - 1;
-            startTime = endTime - intervel;
         } else {
-            startTime = Math.max(startTime, queueBeginTs);
             endTime = Math.min(endTime, queueBeginTs + (this.aliveTimeRange + this.futureAliveTimeRange) * 1000 - 1);
         }
         if (startTime > endTime) {
@@ -359,12 +357,10 @@ public class TimeQueueBuffer<K, V> {
         long tempVal = this.queueBeginTsAndIndex;
         int queueBeginIndex = getQueueBeginIndex(tempVal);
         long queueBeginTs = getQueueBeginTs(tempVal);
+        startTime = Math.max(startTime, queueBeginTs);
         if (isLatest) {
-            long intervel = endTime - startTime;
             endTime = queueBeginTs + this.aliveTimeRange * 1000 - 1;
-            startTime = endTime - intervel;
         } else {
-            startTime = Math.max(startTime, queueBeginTs);
             endTime = Math.min(endTime, queueBeginTs + (this.aliveTimeRange + this.futureAliveTimeRange) * 1000 - 1);
         }
         if (startTime > endTime) {
