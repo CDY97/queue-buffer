@@ -16,7 +16,7 @@ public class QueueBufferFactory {
      * @return
      */
     public static <K, V> QueueBuffer<K, V> getInstance(String key) {
-        return factoryOfQueueBuffer.computeIfAbsent(key, k -> new QueueBufferImpl());
+        return factoryOfQueueBuffer.computeIfAbsent(key, k -> new QueueBufferImpl(key));
     }
 
 }

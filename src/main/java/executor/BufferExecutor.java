@@ -18,7 +18,7 @@ public class BufferExecutor {
         this.executor = executor;
     }
 
-    public static BufferExecutor getInstance(int coreSize) {
+    public static BufferExecutor getInstance(String insName, int coreSize) {
         ExecutorService executor = new ThreadPoolExecutor(
                 coreSize,
                 coreSize * 2,
@@ -30,7 +30,8 @@ public class BufferExecutor {
                     private AtomicInteger threadNumber = new AtomicInteger();
                     @Override
                     public Thread newThread(Runnable r) {
-                        Thread t = new Thread(r, "queueBuffer-executor-thread-" + threadNumber.getAndIncrement());
+                        Thread t = new Thread(r, String.format("queueBuffer-%s-executor-%s", insName,
+                                threadNumber.getAndIncrement()));
                         if (t.isDaemon())
                             t.setDaemon(false);
                         if (t.getPriority() != Thread.NORM_PRIORITY)

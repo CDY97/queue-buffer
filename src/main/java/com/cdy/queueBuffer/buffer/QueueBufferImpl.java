@@ -23,6 +23,12 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
 
     private BufferExecutor executor = null;
 
+    private String insName;
+
+    public QueueBufferImpl(String insName) {
+        this.insName = insName;
+    }
+
     /**
      * 重新设置可缓存开始时间点
      * @param timeStamp
@@ -133,8 +139,8 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     public synchronized QueueBuffer<K, V> start() {
         if (thread == null) {
             timeQueueBuffer.initParams();
-            executor = BufferExecutor.getInstance(syncParallelism);
-            thread = new Thread(new SyncTask());
+            executor = BufferExecutor.getInstance(insName, syncParallelism);
+            thread = new Thread(new SyncTask(), String.format("queueBuffer-%s-main", insName));
             thread.setPriority(Thread.MAX_PRIORITY);
             thread.start();
         } else {
@@ -163,8 +169,8 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
         if (thread != null && !thread.isAlive()) {
             writeBuffer = new WriteBuffer(syncParallelism);
             timeQueueBuffer.initParams();
-            executor = BufferExecutor.getInstance(syncParallelism);
-            thread = new Thread(new SyncTask());
+            executor = BufferExecutor.getInstance(insName, syncParallelism);
+            thread = new Thread(new SyncTask(), String.format("queueBuffer-%s-main", insName));
             thread.setPriority(Thread.MAX_PRIORITY);
             thread.start();
         }
