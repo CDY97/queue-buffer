@@ -1,4 +1,4 @@
-package executor;
+package com.cdy.queueBuffer.executor;
 
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -30,7 +30,7 @@ public class BufferExecutor {
                     private AtomicInteger threadNumber = new AtomicInteger();
                     @Override
                     public Thread newThread(Runnable r) {
-                        Thread t = new Thread(r, String.format("queueBuffer-%s-executor-%s", insName,
+                        Thread t = new Thread(r, String.format("queueBuffer-%s-com.cdy.queueBuffer.executor-%s", insName,
                                 threadNumber.getAndIncrement()));
                         if (t.isDaemon())
                             t.setDaemon(false);

@@ -1,7 +1,7 @@
 package com.cdy.queueBuffer.buffer;
 
 import com.cdy.queueBuffer.bean.WriteBufferBean;
-import executor.BufferExecutor;
+import com.cdy.queueBuffer.executor.BufferExecutor;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
