@@ -76,9 +76,9 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     @Override
     public QueueBuffer<K, V> setSyncParallelism(int syncParallelism) {
         if (thread == null || thread != null && !thread.isAlive()) {
-            if (changeBufferInterval <= 0) {
+            if (syncParallelism <= 0) {
                 throw new IllegalArgumentException("syncParallelism must be greater than 0");
-            } else if (changeBufferInterval > 32) {
+            } else if (syncParallelism > 32) {
                 throw new IllegalArgumentException("syncParallelism must be smaller than 33");
             }
             this.syncParallelism = syncParallelism;
