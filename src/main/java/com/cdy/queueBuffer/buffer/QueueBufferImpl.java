@@ -8,12 +8,29 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.locks.StampedLock;
 
 public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
-    private int syncParallelism = 4;
-    private int changeBufferInterval = 1;
-    private int releaseInterval = 1000;
-    private int retryCount = 3;
 
-    private TimeQueueBuffer<K, V> timeQueueBuffer = new TimeQueueBuffer();
+    // 缓冲同步到缓存使用的并行线程数
+    private int syncParallelism = 4;
+    // 切换缓冲对象的频率（毫秒）
+    private int changeBufferInterval = 1;
+    // 删除过期数据的频率（毫秒）
+    private int releaseInterval = 1000;
+    // 写缓冲重试次数
+    private int retryCount = 3;
+    // 是否只保存每个key的最新数据
+    private boolean latestOnly = false;
+    // 是否缓存当前真实时间范围内的数据，如果定义了customBeginTs即为false
+    private boolean isCurFlag = true;
+    // 自定义开始缓存的时间戳
+    private long customBeginTs = 0;
+    // 有效时间范围
+    private int aliveTimeRange = 60;
+    // 为了解决数据时间戳略微超过右边界从而无法缓存的问题引入，拉长右边界
+    private int futureAliveTimeRange = 5;
+    // 用于删除过期数据的范围，需要大于删除时间间隔
+    private int releaseTimeRange = 1;
+
+    private QueueBufferCore<K, V> timeQueueBuffer = null;
     private volatile WriteBuffer writeBuffer = new WriteBuffer(syncParallelism);
     private Set<K> queueTypeTable = new HashSet<>();
 
@@ -22,7 +39,6 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     private StampedLock putAndSyncLock = new StampedLock();
 
     private BufferExecutor executor = null;
-
     private String insName;
 
     public QueueBufferImpl(String insName) {
@@ -36,8 +52,9 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public QueueBuffer<K, V> changeStartTimeStamp(long timeStamp) {
-        if (thread == null || thread != null && !thread.isAlive()) {
-            timeQueueBuffer.setBeginTs(timeStamp);
+        if (this.checkThread()) {
+            this.customBeginTs = timeStamp;
+            this.isCurFlag = false;
         }
         return this;
     }
@@ -49,8 +66,8 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public QueueBuffer<K, V> setAliveTimeSeconds(int seconds) {
-        if (thread == null || thread != null && !thread.isAlive()) {
-            timeQueueBuffer.setAliveTimeRange(seconds);
+        if (this.checkThread()) {
+            this.aliveTimeRange = seconds;
         }
         return this;
     }
@@ -62,20 +79,20 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public QueueBuffer<K, V> setFutureAliveTimeRangeSeconds(int seconds) {
-        if (thread == null || thread != null && !thread.isAlive()) {
-            timeQueueBuffer.setFutureAliveTimeRange(seconds);
+        if (this.checkThread()) {
+            this.futureAliveTimeRange = seconds;
         }
         return this;
     }
 
     /**
-     * 设置缓冲Map数，值越大发生锁争抢概率越低，但更占内存
+     * 设置同步缓存线程数
      * @param syncParallelism
      * @return
      */
     @Override
     public QueueBuffer<K, V> setSyncParallelism(int syncParallelism) {
-        if (thread == null || thread != null && !thread.isAlive()) {
+        if (this.checkThread()) {
             if (syncParallelism <= 0) {
                 throw new IllegalArgumentException("syncParallelism must be greater than 0");
             } else if (syncParallelism > 32) {
@@ -93,7 +110,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public QueueBuffer<K, V> setChangeBufferIntervalMs(int changeBufferInterval) {
-        if (thread == null || thread != null && !thread.isAlive()) {
+        if (this.checkThread()) {
             if (changeBufferInterval <= 0) {
                 throw new IllegalArgumentException("changeBufferInterval must be greater than 0 ms");
             }
@@ -109,12 +126,12 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public QueueBuffer<K, V> setReleaseIntervalMs(int releaseInterval) {
-        if (thread == null || thread != null && !thread.isAlive()) {
+        if (this.checkThread()) {
             if (releaseInterval <= 0) {
                 throw new IllegalArgumentException("releaseInterval must be greater than 0 ms");
             }
             this.releaseInterval = releaseInterval;
-            this.timeQueueBuffer.setReleaseTimeRange((int) Math.ceil(1.0 * releaseInterval / 1000));
+            this.releaseTimeRange = (int) Math.ceil(1.0 * releaseInterval / 1000);
         }
         return this;
     }
@@ -126,10 +143,40 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public QueueBuffer<K, V> setOptimisticPutRetryCount(int retryCount) {
-        if (thread == null || thread != null && !thread.isAlive()) {
+        if (this.checkThread()) {
             this.retryCount = retryCount;
         }
         return this;
+    }
+
+    /**
+     * 设置是否只保存最新值
+     * @param latestOnly
+     * @return
+     */
+    @Override
+    public QueueBuffer<K, V> setLatestOnly(boolean latestOnly) {
+        if (this.checkThread()) {
+            this.latestOnly = latestOnly;
+        }
+        return this;
+    }
+
+    private boolean checkThread() {
+        return this.thread == null || this.thread != null && !this.thread.isAlive();
+    }
+
+    /**
+     * 初始化queueBufferCore
+     */
+    private void initQueueBufferCore() {
+        if (this.latestOnly) {
+            this.timeQueueBuffer = new LatestQueueBufferCore<>();
+        } else {
+            this.timeQueueBuffer = new TimeQueueBufferCore<>();
+        }
+        this.timeQueueBuffer.initParams(this.isCurFlag, this.customBeginTs, this.aliveTimeRange,
+                this.futureAliveTimeRange, this.releaseTimeRange);
     }
 
     /**
@@ -137,12 +184,12 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public synchronized QueueBuffer<K, V> start() {
-        if (thread == null) {
-            timeQueueBuffer.initParams();
-            executor = BufferExecutor.getInstance(insName, syncParallelism);
-            thread = new Thread(new SyncTask(), String.format("queueBuffer-%s-main", insName));
-            thread.setPriority(Thread.MAX_PRIORITY);
-            thread.start();
+        if (this.thread == null) {
+            this.initQueueBufferCore();
+            this.executor = BufferExecutor.getInstance(this.insName, this.syncParallelism);
+            this.thread = new Thread(new SyncTask(), String.format("queueBuffer-%s-main", this.insName));
+            this.thread.setPriority(Thread.MAX_PRIORITY);
+            this.thread.start();
         } else {
             restart();
         }
@@ -154,10 +201,10 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public synchronized QueueBuffer<K, V> shutDown() {
-        thread.interrupt();
-        writeBuffer = new WriteBuffer(syncParallelism);
-        timeQueueBuffer.initParams();
-        executor.shutDown();
+        this.thread.interrupt();
+        this.initQueueBufferCore();
+        this.writeBuffer = new WriteBuffer(this.syncParallelism);
+        this.executor.shutDown();
         return this;
     }
 
@@ -166,13 +213,13 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public synchronized QueueBuffer<K, V> restart() {
-        if (thread != null && !thread.isAlive()) {
-            writeBuffer = new WriteBuffer(syncParallelism);
-            timeQueueBuffer.initParams();
-            executor = BufferExecutor.getInstance(insName, syncParallelism);
-            thread = new Thread(new SyncTask(), String.format("queueBuffer-%s-main", insName));
-            thread.setPriority(Thread.MAX_PRIORITY);
-            thread.start();
+        if (this.thread != null && !this.thread.isAlive()) {
+            this.initQueueBufferCore();
+            this.writeBuffer = new WriteBuffer(this.syncParallelism);
+            this.executor = BufferExecutor.getInstance(this.insName, this.syncParallelism);
+            this.thread = new Thread(new SyncTask(), String.format("queueBuffer-%s-main", this.insName));
+            this.thread.setPriority(Thread.MAX_PRIORITY);
+            this.thread.start();
         }
         return this;
     }
@@ -183,9 +230,9 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public QueueBuffer<K, V> setAllTypes(K... types) {
-        if (queueTypeTable.isEmpty()) {
+        if (this.queueTypeTable.isEmpty()) {
             for (K type : types) {
-                queueTypeTable.add(type);
+                this.queueTypeTable.add(type);
             }
         }
         return this;
@@ -193,12 +240,12 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
 
     @Override
     public int getSize() {
-        return timeQueueBuffer.getSize();
+        return this.timeQueueBuffer.getSize();
     }
 
     @Override
     public int getLatestOneSize() {
-        return timeQueueBuffer.getLatestOneSize();
+        return this.timeQueueBuffer.getLatestOneSize();
     }
 
     /**
@@ -210,26 +257,26 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public boolean put(String type, K key, V object, long timeStamp) {
-        if (type == null || key == null || object == null) {
+        if (Objects.isNull(type) || Objects.isNull(key) || Objects.isNull(object)) {
             throw new NullPointerException();
         }
         // 校验时间戳是否在可缓存范围内
-        if (timeQueueBuffer.checkTimeStamp(timeStamp)) {
+        if (this.timeQueueBuffer.checkTimeStamp(timeStamp)) {
             WriteBufferBean<K, V> bean = new WriteBufferBean(type, key, object, timeStamp);
             // 尝试写入，通过缓冲的writable字段判断是否发生引用切换，若写入过程中发生了writeBuffer引用切换，则重试
             if (tryPut(bean)) {
                 return true;
             } else {
-                for (int i = 0; i < retryCount; i++) {
-                    if (!timeQueueBuffer.checkTimeStamp(timeStamp)) {
+                for (int i = 0; i < this.retryCount; i++) {
+                    if (!this.timeQueueBuffer.checkTimeStamp(timeStamp)) {
                         return false;
                     }
                     if (tryPut(bean)) {
                         return true;
                     }
                 }
-                // 重试了RetryCount次后获取悲观读锁进行写入
-                if (timeQueueBuffer.checkTimeStamp(timeStamp)) {
+                // 重试了retryCount次后获取悲观读锁进行写入
+                if (this.timeQueueBuffer.checkTimeStamp(timeStamp)) {
                     getReadLockAndPut(bean);
                     return true;
                 } else {
@@ -255,11 +302,11 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      * @param bean
      */
     public void getReadLockAndPut(WriteBufferBean<K, V> bean) {
-        long stamp = putAndSyncLock.readLock();
+        long stamp = this.putAndSyncLock.readLock();
         try {
             this.writeBuffer.write(bean);
         } finally {
-            putAndSyncLock.unlockRead(stamp);
+            this.putAndSyncLock.unlockRead(stamp);
         }
     }
 
@@ -272,7 +319,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public Map<Long, Map<K, V>> getAllByTypeAndTimeRange(String type, long startTime, long endTime) {
-        return timeQueueBuffer.getAllByTypeAndTimeRange(type, startTime, endTime, false);
+        return this.timeQueueBuffer.getAllByTypeAndTimeRange(type, startTime, endTime, false);
     }
 
     /**
@@ -285,7 +332,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
      */
     @Override
     public Map<Long, V> getAllByKeyAndTimeRange(String type, K key, long startTime, long endTime) {
-        return timeQueueBuffer.getAllByKeyAndTimeRange(type, key, startTime, endTime, false);
+        return this.timeQueueBuffer.getAllByKeyAndTimeRange(type, key, startTime, endTime, false);
     }
 
     /**
@@ -297,7 +344,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     @Override
     public Map<Long, Map<K, V>> getLatestAllByType(String type, long timeWindow) {
         long curTime = System.currentTimeMillis();
-        return timeQueueBuffer.getAllByTypeAndTimeRange(type, curTime - timeWindow + 1, curTime, true);
+        return this.timeQueueBuffer.getAllByTypeAndTimeRange(type, curTime - timeWindow + 1, curTime, true);
     }
 
     /**
@@ -310,7 +357,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     @Override
     public Map<Long, V> getLatestAllByKey(String type, K key, long timeWindow) {
         long curTime = System.currentTimeMillis();
-        return timeQueueBuffer.getAllByKeyAndTimeRange(type, key, curTime - timeWindow + 1, curTime, true);
+        return this.timeQueueBuffer.getAllByKeyAndTimeRange(type, key, curTime - timeWindow + 1, curTime, true);
     }
 
     /**
@@ -334,6 +381,15 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
     @Override
     public V getLatestOneByKey(String type, K key, long timeWindow) {
         return this.timeQueueBuffer.getLatestOneByKey(type, key, timeWindow);
+    }
+
+    /**
+     * 获取当前所有的类型
+     * @return
+     */
+    @Override
+    public List<String> getAllTypes() {
+        return this.timeQueueBuffer.getAllTypes();
     }
 
     /**
@@ -395,8 +451,10 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
                 List<Integer> taskIds = buffer.getTaskIds();
                 // 异步执行多个同步缓冲到latestMap的任务
                 syncBufferToLatestMapWithAsync(buffer, taskIds);
-                // 同步等待多个同步缓冲到queueBuffer的任务，需要在最后执行
-                syncBufferToQueueBufferWithSync(buffer, taskIds);
+                if (!latestOnly) {
+                    // 同步等待多个同步缓冲到queueBuffer的任务，需要在最后执行
+                    syncBufferToQueueBufferWithSync(buffer, taskIds);
+                }
             }
         }
 
@@ -452,7 +510,7 @@ public class QueueBufferImpl<K, V> implements QueueBuffer<K, V> {
             if (curTime - releaseTime >= releaseInterval) {
                 timeQueueBuffer.refreshBeginTs();
                 // 异步删除过期缓存
-                CompletableFuture.runAsync(() -> timeQueueBuffer.flashAndRelease(), executor.threadPool());
+                CompletableFuture.runAsync(() -> timeQueueBuffer.flushAndRelease(), executor.threadPool());
                 releaseTime = curTime;
             }
             return releaseTime;

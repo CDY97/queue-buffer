@@ -6,8 +6,9 @@ import com.cdy.queueBuffer.bean.TimeQueueBean;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
-public class TimeQueueBuffer<K, V> {
+public class TimeQueueBufferCore<K, V> implements QueueBufferCore<K, V> {
     // queueBeginTsAndIndex分割位
     private static final int SplitIndex = 20;
     // 队列下标在queueBeginTsAndIndex中的掩码
@@ -41,39 +42,32 @@ public class TimeQueueBuffer<K, V> {
 
     private AtomicInteger size = new AtomicInteger();
 
-    void setBeginTs(long beginTs) {
-        if (beginTs <= 0) {
-            throw new IllegalArgumentException("beginTs must be a timeStamp");
+    /**
+     * 初始化环状数组开始时间、对应下标、上次刷新时间、缓存容量
+     */
+    @Override
+    public void initParams(boolean isCurFlag, long customBeginTs, int aliveTimeRange, int futureAliveTimeRange, int releaseTimeRange) {
+        if (!isCurFlag && customBeginTs <= 0) {
+            throw new IllegalArgumentException("startTimeStamp must be a timeStamp");
         }
-        this.customBeginTs = beginTs;
-        this.isCurFlag = false;
-    }
+        this.isCurFlag = isCurFlag;
+        this.customBeginTs = customBeginTs;
 
-    void setAliveTimeRange(int timeRange) {
-        if (timeRange <= 0 || timeRange > MaxAliveTimeRange) {
-            throw new IllegalArgumentException("timeRange must be between 1 second and 1000 seconds");
+        if (aliveTimeRange <= 0 || aliveTimeRange > MaxAliveTimeRange) {
+            throw new IllegalArgumentException("aliveTime must be between 1 second and 1000 seconds");
         }
-        this.aliveTimeRange = timeRange;
-    }
+        this.aliveTimeRange = aliveTimeRange;
 
-    void setFutureAliveTimeRange(int futureAliveTimeRange) {
         if (futureAliveTimeRange <= 0) {
             throw new IllegalArgumentException("futureAliveTimeRange must be greater than 0 second");
         }
         this.futureAliveTimeRange = futureAliveTimeRange;
-    }
 
-    void setReleaseTimeRange(int releaseTimeRange) {
         if (releaseTimeRange <= 0) {
             throw new IllegalArgumentException("releaseTimeRange must be greater than 0 s");
         }
         this.releaseTimeRange = releaseTimeRange;
-    }
 
-    /**
-     * 初始化环状数组开始时间、对应下标、上次刷新时间、缓存容量
-     */
-    void initParams() {
         long queueBeginTs = 0, curTime = System.currentTimeMillis();
         int queueBeginIndex = 0;
         if (this.isCurFlag) {
@@ -95,16 +89,32 @@ public class TimeQueueBuffer<K, V> {
         this.lastReleaseIndex = queueSize - 1;
     }
 
+    @Override
     public int getSize() {
-        return size.get();
+        return this.size.get();
     }
 
+    @Override
     public int getLatestOneSize() {
         int size = 0;
         for (Map.Entry<String, Map<K, LatestObjBean<V>>> entry : this.latestMap.entrySet()) {
             size += entry.getValue().size();
         }
         return size;
+    }
+
+    /**
+     * 判断数据时间戳是否已超出可缓存范围
+     * @param timeStamp
+     * @return
+     */
+    @Override
+    public boolean checkTimeStamp(long timeStamp) {
+        long queueBeginTs = getQueueBeginTs(this.queueBeginTsAndIndex);
+        if (timeStamp < queueBeginTs || timeStamp - queueBeginTs >= (this.aliveTimeRange + this.futureAliveTimeRange) * 1000) {
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -117,12 +127,28 @@ public class TimeQueueBuffer<K, V> {
     }
 
     /**
+     * 直接获取队列起始位置下标
+     * @return
+     */
+    private int getQueueBeginIndex() {
+        return (int) (this.queueBeginTsAndIndex & QueueBeginIndexMask);
+    }
+
+    /**
      * 通过queueBeginTsAndIndex获取可缓存范围开始时间
      * @param val
      * @return
      */
     private long getQueueBeginTs(long val) {
         return val >> SplitIndex;
+    }
+
+    /**
+     * 直接获取时间窗口左边界时间戳
+     * @return
+     */
+    private long getQueueBeginTs() {
+        return this.queueBeginTsAndIndex >> SplitIndex;
     }
 
     /**
@@ -148,37 +174,26 @@ public class TimeQueueBuffer<K, V> {
     }
 
     /**
-     * 判断数据时间戳是否已超出可缓存范围
-     * @param timeStamp
-     * @return
-     */
-    public boolean checkTimeStamp(long timeStamp) {
-        long queueBeginTs = getQueueBeginTs(this.queueBeginTsAndIndex);
-        if (timeStamp < queueBeginTs || timeStamp - queueBeginTs >= (this.aliveTimeRange + this.futureAliveTimeRange) * 1000) {
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * 缓冲同步至缓存时调用
+     * 缓冲同步至缓存时调用，需要保证同一个时间戳的所有数据只被一个线程同步
      * @param type
      * @param key
      * @param object
      * @param timeStamp
      * @return
      */
+    @Override
     public void putObject(String type, K key, V object, long timeStamp) {
         int index = getQueueIndexByTimeStamp(timeStamp);
-        TimeQueueBean queueObj = queue[index];
+        TimeQueueBean queueObj = this.queue[index];
         if (queueObj == null) {
             queueObj = new TimeQueueBean();
-            queue[index] = queueObj;
+            this.queue[index] = queueObj;
         }
         int incr = queueObj.putObject(type, key, object);
-        size.addAndGet(incr);
+        this.size.addAndGet(incr);
     }
 
+    @Override
     public void putObjectInLatestMap(String type, K key, V object, long timeStamp) {
         // java8的ConcurrentHashMap的computeIfAbsent即使key存在时也会加锁，性能较差
         Map<K, LatestObjBean<V>> typeMap = this.latestMap.get(type);
@@ -205,36 +220,37 @@ public class TimeQueueBuffer<K, V> {
     /**
      * 释放资源
      */
-    public synchronized void flashAndRelease() {
+    @Override
+    public synchronized void flushAndRelease() {
         long tempVal = this.queueBeginTsAndIndex;
-        // 以新下标开始向前删除缓存数据
+        // 以新下标开始向前删除releaseTimeRange秒的缓存数据
         long queueBeginTs = getQueueBeginTs(tempVal);
         int queueBeginIndex = getQueueBeginIndex(tempVal);
         int beginIndex = (this.lastReleaseIndex + 1) % this.queueSize;
         int endIndex = (queueBeginIndex - 1 + this.queueSize) % this.queueSize;
         if (beginIndex > endIndex) {
             for (int i = beginIndex; i < this.queueSize; i++) {
-                TimeQueueBean<K, V> bean = queue[i];
+                TimeQueueBean<K, V> bean = this.queue[i];
                 if (bean != null) {
-                    size.getAndAdd(-bean.getSize());
+                    this.size.getAndAdd(-bean.getSize());
                 }
             }
             for (int i = 0; i <= endIndex; i++) {
-                TimeQueueBean<K, V> bean = queue[i];
+                TimeQueueBean<K, V> bean = this.queue[i];
                 if (bean != null) {
-                    size.getAndAdd(-bean.getSize());
+                    this.size.getAndAdd(-bean.getSize());
                 }
             }
-            Arrays.fill(queue, beginIndex, this.queueSize, null);
-            Arrays.fill(queue, 0, endIndex + 1, null);
+            Arrays.fill(this.queue, beginIndex, this.queueSize, null);
+            Arrays.fill(this.queue, 0, endIndex + 1, null);
         } else {
             for (int i = beginIndex; i <= endIndex; i++) {
-                TimeQueueBean<K, V> bean = queue[i];
+                TimeQueueBean<K, V> bean = this.queue[i];
                 if (bean != null) {
-                    size.getAndAdd(-bean.getSize());
+                    this.size.getAndAdd(-bean.getSize());
                 }
             }
-            Arrays.fill(queue, beginIndex, endIndex + 1, null);
+            Arrays.fill(this.queue, beginIndex, endIndex + 1, null);
         }
         // 清除latestMap里的过期数据
         Iterator<Map.Entry<String, Map<K, LatestObjBean<V>>>> typeIterator = this.latestMap.entrySet().iterator();
@@ -259,15 +275,16 @@ public class TimeQueueBuffer<K, V> {
     /**
      * 刷新环状数组可缓存范围的开始时间
      */
+    @Override
     public synchronized void refreshBeginTs() {
         long tempVal = this.queueBeginTsAndIndex;
         // 根据真实时间差推动时间轮的beginTs
         // 时间轮有效时间窗口左边界对应环状数组下标
         long curTs = System.currentTimeMillis();
         // 新的下标
-        int queueBeginIndex = (int) (getQueueBeginIndex(tempVal) + curTs - lastRefreshTs) % this.queueSize;
+        int queueBeginIndex = (int) (getQueueBeginIndex(tempVal) + curTs - this.lastRefreshTs) % this.queueSize;
         // 新的beginTs
-        long queueBeginTs = getQueueBeginTs(tempVal) + curTs - lastRefreshTs;
+        long queueBeginTs = getQueueBeginTs(tempVal) + curTs - this.lastRefreshTs;
         this.queueBeginTsAndIndex = getQueueBeginTsAndIndex(queueBeginTs, queueBeginIndex);
         this.lastRefreshTs = curTs;
     }
@@ -279,11 +296,9 @@ public class TimeQueueBuffer<K, V> {
      * @param endTime
      * @return
      */
+    @Override
     public Map<Long, Map<K, V>> getAllByTypeAndTimeRange(String type, long startTime, long endTime, boolean isLatest) {
         Map<Long, Map<K, V>> resMap = new LinkedHashMap<>();
-        if (type == null) {
-            return resMap;
-        }
         long tempVal = this.queueBeginTsAndIndex;
         int queueBeginIndex = getQueueBeginIndex(tempVal);
         long queueBeginTs = getQueueBeginTs(tempVal);
@@ -299,14 +314,14 @@ public class TimeQueueBuffer<K, V> {
         }
         int beginIndex = getQueueIndexByTimeStamp(startTime);
         int endIndex = getQueueIndexByTimeStamp(endTime);
-        if (beginIndex < 0 || beginIndex >= queueSize || endIndex < 0 || endIndex >= queueSize) {
+        if (beginIndex < 0 || beginIndex >= this.queueSize || endIndex < 0 || endIndex >= this.queueSize) {
             return resMap;
         }
         if (beginIndex > endIndex) {
             // 环状数组起始时间与对应时间戳的差
             long tempInterval = queueBeginTs - queueBeginIndex;
             for (int i = beginIndex; i < this.queueSize; i++) {
-                TimeQueueBean<K, V> bean = queue[i];
+                TimeQueueBean<K, V> bean = this.queue[i];
                 if (bean != null) {
                     Map<K, V> typeMap = bean.searchByType(type);
                     if (typeMap != null && !typeMap.isEmpty()) {
@@ -317,7 +332,7 @@ public class TimeQueueBuffer<K, V> {
             // 环状数组下标移动到数组首部后，下标从0开始计数，而此时对应时间戳应该还是递增的，因此差值加上数组长度
             tempInterval = queueBeginTs - queueBeginIndex + this.queueSize;
             for (int i = 0; i <= endIndex; i++) {
-                TimeQueueBean<K, V> bean = queue[i];
+                TimeQueueBean<K, V> bean = this.queue[i];
                 if (bean != null) {
                     Map<K, V> typeMap = bean.searchByType(type);
                     if (typeMap != null && !typeMap.isEmpty()) {
@@ -329,7 +344,7 @@ public class TimeQueueBuffer<K, V> {
             // 查询范围开始下标如果小于环状数组起始下标，则说明查询范围已从0开始计数，因此差值加上数组长度
             long tempInterval = beginIndex >= queueBeginIndex ? queueBeginTs - queueBeginIndex : queueBeginTs - queueBeginIndex + this.queueSize;
             for (int i = beginIndex; i <= endIndex; i++) {
-                TimeQueueBean<K, V> bean = queue[i];
+                TimeQueueBean<K, V> bean = this.queue[i];
                 if (bean != null) {
                     Map<K, V> typeMap = bean.searchByType(type);
                     if (typeMap != null && !typeMap.isEmpty()) {
@@ -349,11 +364,9 @@ public class TimeQueueBuffer<K, V> {
      * @param endTime
      * @return
      */
+    @Override
     public Map<Long, V> getAllByKeyAndTimeRange(String type, K key, long startTime, long endTime, boolean isLatest) {
         Map<Long, V> resMap = new LinkedHashMap<>();
-        if (type == null || key == null) {
-            return resMap;
-        }
         long tempVal = this.queueBeginTsAndIndex;
         int queueBeginIndex = getQueueBeginIndex(tempVal);
         long queueBeginTs = getQueueBeginTs(tempVal);
@@ -368,13 +381,13 @@ public class TimeQueueBuffer<K, V> {
         }
         int beginIndex = getQueueIndexByTimeStamp(startTime);
         int endIndex = getQueueIndexByTimeStamp(endTime);
-        if (beginIndex < 0 || beginIndex >= queueSize || endIndex < 0 || endIndex >= queueSize) {
+        if (beginIndex < 0 || beginIndex >= this.queueSize || endIndex < 0 || endIndex >= this.queueSize) {
             return resMap;
         }
         if (beginIndex > endIndex) {
             long tempInterval = queueBeginTs - queueBeginIndex;
             for (int i = beginIndex; i < this.queueSize; i++) {
-                TimeQueueBean<K, V> bean = queue[i];
+                TimeQueueBean<K, V> bean = this.queue[i];
                 if (bean != null) {
                     V obj = bean.searchByKey(type, key);
                     if (obj != null) {
@@ -384,7 +397,7 @@ public class TimeQueueBuffer<K, V> {
             }
             tempInterval = queueBeginTs - queueBeginIndex + this.queueSize;
             for (int i = 0; i <= endIndex; i++) {
-                TimeQueueBean<K, V> bean = queue[i];
+                TimeQueueBean<K, V> bean = this.queue[i];
                 if (bean != null) {
                     V obj = bean.searchByKey(type, key);
                     if (obj != null) {
@@ -395,7 +408,7 @@ public class TimeQueueBuffer<K, V> {
         } else {
             long tempInterval = beginIndex >= queueBeginIndex ? queueBeginTs - queueBeginIndex : queueBeginTs - queueBeginIndex + this.queueSize;
             for (int i = beginIndex; i <= endIndex; i++) {
-                TimeQueueBean<K, V> bean = queue[i];
+                TimeQueueBean<K, V> bean = this.queue[i];
                 if (bean != null) {
                     V obj = bean.searchByKey(type, key);
                     if (obj != null) {
@@ -407,12 +420,10 @@ public class TimeQueueBuffer<K, V> {
         return resMap;
     }
 
+    @Override
     public Map<K, V> getLatestOneByType(String type, long timeWindow) {
-        Map<K, V> resMap = new HashMap<>();
-        if (type == null) {
-            return resMap;
-        }
         long beginTs = getQueueBeginTs(this.queueBeginTsAndIndex) + this.aliveTimeRange * 1000 - timeWindow;
+        Map<K, V> resMap = new HashMap<>();
         Map<K, LatestObjBean<V>> typeMap = this.latestMap.get(type);
         if (typeMap != null) {
             for (Map.Entry<K, LatestObjBean<V>> entry : typeMap.entrySet()) {
@@ -425,12 +436,10 @@ public class TimeQueueBuffer<K, V> {
         return resMap;
     }
 
+    @Override
     public V getLatestOneByKey(String type, K key, long timeWindow) {
-        V resObj = null;
-        if (type == null || key == null) {
-            return resObj;
-        }
         long beginTs = getQueueBeginTs(this.queueBeginTsAndIndex) + this.aliveTimeRange * 1000 - timeWindow;
+        V resObj = null;
         Map<K, LatestObjBean<V>> typeMap = this.latestMap.get(type);
         if (typeMap != null) {
             LatestObjBean<V> bean = typeMap.get(key);
@@ -439,5 +448,14 @@ public class TimeQueueBuffer<K, V> {
             }
         }
         return resObj;
+    }
+
+    /**
+     * 获取当前所有的类型
+     * @return
+     */
+    @Override
+    public List<String> getAllTypes() {
+        return this.latestMap.keySet().stream().collect(Collectors.toList());
     }
 }

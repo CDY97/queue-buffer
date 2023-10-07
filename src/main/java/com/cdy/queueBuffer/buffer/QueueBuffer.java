@@ -1,5 +1,6 @@
 package com.cdy.queueBuffer.buffer;
 
+import java.util.List;
 import java.util.Map;
 
 public interface QueueBuffer<K, V> {
@@ -17,6 +18,8 @@ public interface QueueBuffer<K, V> {
     public QueueBuffer<K, V> setReleaseIntervalMs(int releaseInterval);
 
     public QueueBuffer<K, V> setOptimisticPutRetryCount(int retryCount);
+
+    public QueueBuffer<K, V> setLatestOnly(boolean latestOnly);
 
     public QueueBuffer<K, V> start();
 
@@ -44,4 +47,6 @@ public interface QueueBuffer<K, V> {
     public Map<K, V> getLatestOneByType(String type, long timeWindow);
 
     public V getLatestOneByKey(String type, K key, long timeWindow);
+
+    public List<String> getAllTypes();
 }
